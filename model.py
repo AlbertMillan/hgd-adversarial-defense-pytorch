@@ -34,6 +34,7 @@ class NetworkBlock(nn.Module):
     def __init__(self, nb_layers, in_planes, out_planes, block, stride, dropRate=0.0):
         super(NetworkBlock, self).__init__()
         self.layer = self._make_layer(block, in_planes, out_planes, nb_layers, stride, dropRate)
+        
     def _make_layer(self, block, in_planes, out_planes, nb_layers, stride, dropRate):
         layers = []
         for i in range(int(nb_layers)):

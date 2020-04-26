@@ -11,7 +11,8 @@ import sys, os
 
 from attacks import Attacks
 from model import WideResNet
-from processor import Preprocessor, AverageMeter
+from denoiser import Denoiser
+from processor import Preprocessor, AverageMeter, accuracy
 
 
 TRAIN_AND_TEST = 0
@@ -53,7 +54,8 @@ class Classifier:
         self.target_model = self.load_model(self.cuda, load_dir, load_name, TEST)
         
         # Load Denoiser
-#         self.denoiser =
+        self.denoiser = Denoiser(x_h=32, x_w=32)
+        self.denoiser = self.denoiser.cuda()
 
 #         sys.exit()
                 
@@ -76,26 +78,28 @@ class Classifier:
         return model
         
     
-    def grad_step(self, x_batch, y_batch, optimizer, losses, top1, k=1):
+    def grad_step(self, x_batch, y_batch):
         """ Performs a step during training. """
         # Compute output for example
         logits = self.target_model(x_batch)
         loss = self.target_model.module.loss(logits, y_batch)
+        
+        return logits, loss
 
         # Update Mean loss for current iteration
-        losses.update(loss.item(), x_batch.size(0))
-        prec1 = accuracy(logits.data, y_batch, k=k)
-        top1.update(prec1.item(), x_batch.size(0))
+#         losses.update(loss.item(), x_batch.size(0))
+#         prec1 = accuracy(logits.data, y_batch, k=k)
+#         top1.update(prec1.item(), x_batch.size(0))
         
-        # compute gradient and do SGD step
-        loss.backward()
-        optimizer.step()
+#         # compute gradient and do SGD step
+#         loss.backward()
+#         optimizer.step()
         
-        # Set grads to zero for new iter
-        optimizer.zero_grad()
+#         # Set grads to zero for new iter
+#         optimizer.zero_grad()
         
     
-    def no_grad_step(self, x_batch, y_batch, losses, top1, k=1):
+    def no_grad_step(self, x_batch, y_batch):
         """ Performs a step during testing."""
         logits, loss = None, None
         with torch.no_grad():
@@ -110,7 +114,7 @@ class Classifier:
         return logits, loss
     
     
-    def train(self, momentum, nesterov, weight_decay, train_max_iter=1, test_max_iter=1):
+    def train(self, train_max_iter=1, test_max_iter=1):
         
         self.target_model.eval()
 
@@ -127,8 +131,7 @@ class Classifier:
             
 #             self.model.train()
             
-#             optimizer = optim.SGD(self.model.parameters(), lr=compute_lr(self.learning_rate, itr), 
-#                                   momentum=momentum, nesterov=nesterov, weight_decay=weight_decay)
+            optimizer = optim.Adam(self.denoiser.parameters(), lr=self.learning_rate)
             
             losses = AverageMeter()
             batch_time = AverageMeter()
@@ -145,17 +148,40 @@ class Classifier:
                 # FGSM
                 if not stored:
                     # 1. Generate Predictions on batch
-                    logits, _ = self.no_grad_step(x, y, losses, top1)
+                    logits, _ = self.no_grad_step(x, y)
                     y_pred = torch.argmax(logits, dim=1)
 
                     # 2. Generate adversaries with y_pred (avoids 'label leak' problem)
                     x_adv, _ = self.adversarial_generator.fast_pgd(x, y_pred, train_max_iter, mode='train')
                     self.adversarial_generator.retain_adversaries(x_adv, y, mode='train')
                 else:
-                    x_adv, y_adv = self.adversarial_generator.fast_pgd(x, y_pred, train_max_iter, mode='train')
+                    x_adv, y_adv = self.adversarial_generator.fast_pgd(x, y, train_max_iter, mode='train')
                 
-                # 3. TODO: Feed into denoiser
+                # 3. Compute denoised image. Need to check this...
+                noise = self.denoiser.forward(x_adv)
+                x_smooth = x_adv + noise
                 
+#                 print(noise)
+                
+                # 4. Get logits from smooth and denoised image
+                logits_smooth, _ = self.grad_step(x_smooth, y)
+                logits_org, _ = self.grad_step(x, y)
+                
+                # 5. Compute loss
+                loss = torch.sum( torch.abs(logits_smooth - logits_org) ) / x.size(0)
+                
+                # 6. Update Mean loss for current iteration
+                losses.update(loss.item(), x.size(0))
+                prec1 = accuracy(logits_smooth.data, y)
+                top1.update(prec1.item(), x.size(0))
+
+                # compute gradient and do SGD step
+                loss.backward()
+                optimizer.step()
+
+                # Set grads to zero for new iter
+                optimizer.zero_grad()
+
                 batch_time.update(time.time() - end)
                 end = time.time()
                 
@@ -166,25 +192,23 @@ class Classifier:
                           'Prec@1 {top1.val:.3f} ({top1.avg:.3f})'.format(
                               itr, i, len(self.train_loader), batch_time=batch_time,
                               loss=losses, top1=top1))
-                    
-                sys.exit()
             
             # Evaluate on validation set
 #             test_loss, test_prec1 = self.test(self.test_loader, test_max_iter)
             
-            train_loss_hist.append(losses.avg)
-            train_acc_hist.append(top1.avg)
-            test_loss_hist.append(test_loss)
-            test_acc_hist.append(test_prec1)
+#             train_loss_hist.append(losses.avg)
+#             train_acc_hist.append(top1.avg)
+#             test_loss_hist.append(test_loss)
+#             test_acc_hist.append(test_prec1)
             
             # Store best model
-            is_best = best_pred < test_prec1
+#             is_best = best_pred < test_prec1
 #             self.save_checkpoint(is_best, (itr+1), self.model.state_dict(), self.save_dir)
-            if is_best:
-                best_pred = test_prec1
+#             if is_best:
+#                 best_pred = test_prec1
                 
             # Adversarial examples generated on the first iteration. Store them if re-using same iteration ones.
-            if self.train_adv and self.store_adv:
+            if self.store_adv:
                 self.adversarial_generator.set_stored('train', True)
                 
         return (train_loss_hist, train_acc_hist, test_loss_hist, test_acc_hist)
@@ -266,11 +290,9 @@ if __name__ == '__main__':
     
     
     # MODEL HYPERPARAMETERS
-    parser.add_argument('--lr', default=0.1, metavar='lr', type=float, help='Learning rate')
+    parser.add_argument('--lr', default=0.001, metavar='lr', type=float, help='Learning rate')
     parser.add_argument('--itr', default=30, metavar='iter', type=int, help='Number of iterations')
-    parser.add_argument('--batch_size', default=64, metavar='batch_size', type=int, help='Batch size')
-    parser.add_argument('--momentum', '--m', default=0.9, type=float, help='Momentum')
-    parser.add_argument('--nesterov', default=True, type=bool, help='nesterov momentum')
+    parser.add_argument('--batch_size', default=60, metavar='batch_size', type=int, help='Batch size')
     parser.add_argument('--weight_decay', '--wd', default=2e-4, type=float, help='weight decay (default: 2e-4)')
     parser.add_argument('--print_freq', '-p', default=10, type=int, help='print frequency (default: 10)')
     parser.add_argument('--topk', '-k', default=1, type=int, help='Compute accuracy over top k-predictions (default: 1)')
@@ -306,10 +328,7 @@ if __name__ == '__main__':
     print("==================== TRAINING ====================")
     
     if args.mode == TRAIN_AND_TEST:
-        train_loss_hist, train_acc_hist, test_loss_hist, test_acc_hist = classifier.train(args.momentum,
-                                                                                          args.nesterov, 
-                                                                                          args.weight_decay,
-                                                                                          train_max_iter=args.train_max_iter,
+        train_loss_hist, train_acc_hist, test_loss_hist, test_acc_hist = classifier.train(train_max_iter=args.train_max_iter,
                                                                                           test_max_iter=args.test_max_iter)
 
         model_type = ['plain','PGD','CW']

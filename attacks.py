@@ -77,6 +77,7 @@ class Attacks:
             self.adv_examples[mode][(self.count[mode]):(self.count[mode] + x_adv.size(0))] = x_adv.clone().detach()
             self.adv_labels[mode][(self.count[mode]):(self.count[mode] + x_adv.size(0))] = y_batch.clone().detach()
             self.count[mode] = self.count[mode] + x_adv.size(0)
+            
         
  
     # =================================== ATTACK ALGORITHMS HELPER ===================================

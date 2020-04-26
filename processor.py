@@ -140,3 +140,15 @@ class AverageMeter():
         self.sum += val * n
         self.count += n
         self.avg = self.sum / self.count
+        
+
+        
+def accuracy(logits, y, K=1):
+    """Computes the precision@k for the specified values of k"""
+    # Rehape to [N, 1]
+    target = y.view(-1, 1)
+
+    _, pred = torch.topk(logits, K, dim=1, largest=True, sorted=True)
+    correct = torch.eq(pred, target)
+
+    return torch.sum(correct).float() / y.size(0)
